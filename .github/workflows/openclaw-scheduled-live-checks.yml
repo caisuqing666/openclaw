@@ -2,8 +2,26 @@ name: OpenClaw Scheduled Live And E2E Checks
 
 on:
   schedule:
-    - cron: "23 4 * * *"
+    # Run at 11:30 Asia/Shanghai every day.
+    - cron: "30 11 * * *"
+      timezone: "Asia/Shanghai"
   workflow_dispatch:
+    inputs:
+      include_repo_e2e:
+        description: Whether to run pnpm test:e2e plus repo-specific extra E2E lanes
+        required: false
+        default: true
+        type: boolean
+      include_openwebui:
+        description: Whether to run the Open WebUI Docker smoke
+        required: false
+        default: true
+        type: boolean
+      include_live_suites:
+        description: Whether to run live-provider coverage
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -17,17 +35,70 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  resolve_target:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+      include_repo_e2e: ${{ steps.inputs.outputs.include_repo_e2e }}
+      include_openwebui: ${{ steps.inputs.outputs.include_openwebui }}
+      include_live_suites: ${{ steps.inputs.outputs.include_live_suites }}
+    steps:
+      - name: Require main workflow ref
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${WORKFLOW_REF}" != "refs/heads/main" ]]; then
+            echo "Scheduled live checks must run from main so the workflow definition and secrets stay canonical." >&2
+            exit 1
+          fi
+
+      - name: Capture selected ref
+        id: ref
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: printf 'ref=%s\n' "${WORKFLOW_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Capture lane selection
+        id: inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_INCLUDE_REPO_E2E: ${{ inputs.include_repo_e2e }}
+          INPUT_INCLUDE_OPENWEBUI: ${{ inputs.include_openwebui }}
+          INPUT_INCLUDE_LIVE_SUITES: ${{ inputs.include_live_suites }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            include_repo_e2e="${INPUT_INCLUDE_REPO_E2E}"
+            include_openwebui="${INPUT_INCLUDE_OPENWEBUI}"
+            include_live_suites="${INPUT_INCLUDE_LIVE_SUITES}"
+          else
+            include_repo_e2e="true"
+            include_openwebui="true"
+            include_live_suites="true"
+          fi
+
+          {
+            printf 'include_repo_e2e=%s\n' "${include_repo_e2e}"
+            printf 'include_openwebui=%s\n' "${include_openwebui}"
+            printf 'include_live_suites=%s\n' "${include_live_suites}"
+          } >> "$GITHUB_OUTPUT"
+
   live_and_openwebui_checks:
+    needs: [resolve_target]
     permissions:
       contents: read
       pull-requests: read
     uses: ./.github/workflows/openclaw-live-and-e2e-checks-reusable.yml
     with:
-      ref: ${{ github.sha }}
-      include_repo_e2e: true
+      ref: ${{ needs.resolve_target.outputs.ref }}
+      include_repo_e2e: ${{ needs.resolve_target.outputs.include_repo_e2e == 'true' }}
       include_release_path_suites: false
-      include_openwebui: true
-      include_live_suites: true
+      include_openwebui: ${{ needs.resolve_target.outputs.include_openwebui == 'true' }}
+      include_live_suites: ${{ needs.resolve_target.outputs.include_live_suites == 'true' }}
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
